@@ -1,0 +1,14 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.out
+*.tmp
+*.bak
+*.swp
+.DS_Store
+.idea/
+.vscode/
