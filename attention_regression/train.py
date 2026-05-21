@@ -42,7 +42,7 @@ def train_Bilinear(
 
     for step in range(steps):
         Xm, Ym, Xq, Yq = sample_memory_query_batch(X, Y, memory_size, query_size)
-        Yhat = model()
+        Yhat = model(Xq, Xm, Ym)
         loss = F.mse_loss(Yq, Yhat)
 
         opti.zero_grad()
@@ -76,7 +76,7 @@ def train_Attn(
 
     for step in range(steps):
         Xm, Ym, Xq, Yq = sample_memory_query_batch(X, Y, memory_size, query_size)
-        Yhat = model()
+        Yhat = model(Xq, Xm, Ym)
         loss = F.mse_loss(Yq, Yhat)
 
         opti.zero_grad()

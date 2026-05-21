@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, random_split, DataLoader
 
 class SynDataModule:
     def __init__(self, batch_size=32, val_split=0.2):
-        data, labels = synData()
+        data, labels = synthetic_data()
         self.data = data
         self.labels = labels
         self.batch_size = batch_size
@@ -35,7 +35,7 @@ class SynDataset(Dataset):
         return self.data[idx], self.labels[idx]
 
 
-def synData() -> tuple[torch.Tensor, torch.Tensor]:
+def synthetic_data() -> tuple[torch.Tensor, torch.Tensor]:
     def make_covariance(dim: int, rho: float) -> torch.Tensor:
         if not 0 <= rho < 1:
             raise ValueError("rho must be in the range [0, 1)")

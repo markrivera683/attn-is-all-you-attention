@@ -2,41 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from enum import Enum
 import math
-
-class AttentionMode(Enum):
-    DOT = "dot"
-    WHITENED = "whitened"
-    LINEAR = "linear"
-    BILINEAR = "bilnear"
-    STD = "std"
-
-class HandCraftAttention(nn.Module):
-    def __init__(self, dim: int, mode: AttentionMode, lambda_reg: float = 1e-5) -> None:
-        super().__init__()
-        self.dim = dim
-        self.mode = mode
-
-        mode_layer = {
-            AttentionMode.DOT: DotProdAttention(), 
-            AttentionMode.WHITENED: WhitenedDotProdAttention(dim, lambda_reg),
-            AttentionMode.LINEAR: LinearRegression(dim, lambda_reg),
-            AttentionMode.BILINEAR: LearnBilinear(dim),
-            AttentionMode.STD: Attention(dim)
-        }
-
-        if mode not in mode_layer:
-            raise ValueError(f"Unknow mode : {mode}")
-        
-        self.attn = mode_layer[mode]
-
-    def forward(self,
-                query: torch.Tensor, 
-                key: torch.Tensor, 
-                value: torch.Tensor) -> torch.Tensor:
-        return self.attn(query, key, value)
-
     
 class DotProdAttention(nn.Module):
     def __init__(self) -> None:
