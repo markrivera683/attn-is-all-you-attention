@@ -1,4 +1,5 @@
 .venv/
+.python-version
 .pytest_cache/
 __pycache__/
 *.pyc
@@ -14,3 +15,4 @@ __pycache__/
 .vscode/
 
 wandb/
+ckpt/
