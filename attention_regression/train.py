@@ -21,12 +21,12 @@ class TrainConfig:
     dim: int = 20
     lambda_reg: float = 1e-3
     lr: float = 1e-3
-    num_epochs: int = 5
+    num_epochs: int = 50
     eval_episodes: int = 100
-    batch_size: int = 128
-    query_ratio: float = 0.333
+    batch_size: int = 192
+    query_ratio: float = 0.3333
     log_interval: int = 20
-    device: str = "cpu"
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
     use_wandb: bool = False
     wandb_project: str = "attention mechanism"
@@ -86,7 +86,7 @@ def run_training(config: TrainConfig) -> None:
 
     X, Y = synthetic_data(samples=config.samples, dim=config.dim, noise=0.1)
     data = SynDataset(X, Y)
-    dataloader = DataLoader(data, batch_size=config.batch_size)
+    dataloader = DataLoader(data, batch_size=config.batch_size, shuffle=True, drop_last=True)
 
     # Training the Bilinear Model
     bilinearModel = LearnBilinear(config.dim).to(device)
@@ -112,11 +112,12 @@ def run_training(config: TrainConfig) -> None:
             X, Y = X.to(device), Y.to(device)
             X_m, Y_m, X_q, Y_q = sample_memory_query_batch(X, Y, config.query_ratio)
             optimizer.zero_grad()
-            loss = F.mse_loss(bilinearModel(X_q, X_m, Y_m), Y_q)
+            pred = bilinearModel(X_q, X_m, Y_m)
+            loss = F.mse_loss(pred, Y_q)
             loss.backward()
             optimizer.step()
 
-            if steps % config.log_interval == 0:
+            if config.use_wandb and steps % config.log_interval == 0:
                 wandb.log({"loss": loss.item()}, step=steps)
 
             steps += 1
@@ -152,7 +153,7 @@ def run_training(config: TrainConfig) -> None:
             loss.backward()
             optimizer.step()
 
-            if steps % config.log_interval == 0:
+            if config.use_wandb and steps % config.log_interval == 0:
                 wandb.log({"loss": loss.item()}, step=steps)
 
             steps += 1
