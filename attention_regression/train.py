@@ -34,7 +34,7 @@ def train_Bilinear(
         epoch: float = 10.0,
         lr: float = 1e-3,
         log_interval: int = 50
-) -> tuple[nn.Module, list[float]]:
+) -> tuple[LearnBilinear, list[float]]:
     
     model = LearnBilinear(dim)
     opti = torch.optim.Adam(model.parameters(), lr=lr)
@@ -68,7 +68,7 @@ def train_Attn(
         epoch: float = 10.0,
         lr: float = 1e-3,
         log_interval: int = 50
-) -> tuple[nn.Module, list[float]]:
+) -> tuple[Attention, list[float]]:
     
     model = Attention(dim)
     opti = torch.optim.Adam(model.parameters(), lr=lr)
