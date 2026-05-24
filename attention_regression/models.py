@@ -8,7 +8,7 @@ class DotProdAttention(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self._M = None
-        self.G = None
+        self._G = None
         self.Attn = None
 
     def forward(
@@ -21,14 +21,18 @@ class DotProdAttention(nn.Module):
             "query and key must have the same feature dimension"
 
         self._M = None
-        self.G = query @ key.T
-        self.Attn = F.softmax(self.G, dim=-1)
+        self._G = query @ key.T
+        self.Attn = F.softmax(self._G, dim=-1)
 
         return self.Attn @ value
 
     @property
     def M(self):
         return self._M
+
+    @property
+    def G(self):
+        return self._G
 
 
 class WhitenedDotProdAttention(nn.Module):
@@ -37,7 +41,7 @@ class WhitenedDotProdAttention(nn.Module):
         self.dim = dim
         self.lambda_reg = lambda_reg
         self._M = None
-        self.G = None
+        self._G = None
         self.Attn = None
 
     def forward(
@@ -61,14 +65,18 @@ class WhitenedDotProdAttention(nn.Module):
         S_inv = torch.linalg.solve(S, I)
 
         self._M = S_inv
-        self.G = query @ S_inv @ key.T
-        self.Attn = F.softmax(self.G, dim=-1)
+        self._G = query @ S_inv @ key.T
+        self.Attn = F.softmax(self._G, dim=-1)
 
         return self.Attn @ value
 
     @property
     def M(self):
         return self._M
+
+    @property
+    def G(self):
+        return self._G
 
 
 class LinearRegression(nn.Module):
@@ -77,7 +85,7 @@ class LinearRegression(nn.Module):
         self.dim = dim
         self.lambda_reg = lambda_reg
         self._M = None
-        self.G = None
+        self._G = None
         self.Attn = None
 
     def forward(
@@ -101,18 +109,22 @@ class LinearRegression(nn.Module):
         S_inv = torch.linalg.solve(S, I)
 
         self._M = S_inv
-        self.G = query @ S_inv @ key.T
+        self._G = query @ S_inv @ key.T
 
         # Important:
         # For linear regression, this is not a probability attention matrix.
         # It may contain negative values and rows do not necessarily sum to 1.
-        self.Attn = self.G
+        self.Attn = self._G
 
         return self.Attn @ value
 
     @property
     def M(self):
         return self._M
+
+    @property
+    def G(self):
+        return self._G
 
 
 class LearnBilinear(nn.Module):
@@ -124,7 +136,7 @@ class LearnBilinear(nn.Module):
         nn.init.kaiming_uniform_(self.W, a=math.sqrt(5))
 
         self._M = None
-        self.G = None
+        self._G = None
         self.Attn = None
 
     def forward(
@@ -137,14 +149,18 @@ class LearnBilinear(nn.Module):
             "query and key must have the same feature dimension"
 
         self._M = self.W
-        self.G = query @ self.W @ key.T
-        self.Attn = F.softmax(self.G, dim=-1)
+        self._G = query @ self.W @ key.T
+        self.Attn = F.softmax(self._G, dim=-1)
 
         return self.Attn @ value
 
     @property
     def M(self):
         return self._M
+
+    @property
+    def G(self):
+        return self._G
 
 
 class Attention(nn.Module):
@@ -159,7 +175,7 @@ class Attention(nn.Module):
         nn.init.kaiming_uniform_(self.Wm, a=math.sqrt(5))
 
         self._M = None
-        self.G = None
+        self._G = None
         self.Attn = None
 
     def forward(
@@ -172,11 +188,15 @@ class Attention(nn.Module):
             "query and key must have the same feature dimension"
 
         self._M = self.Wq @ self.Wm.T
-        self.G = query @ self._M @ key.T
-        self.Attn = F.softmax(self.G, dim=-1)
+        self._G = query @ self._M @ key.T
+        self.Attn = F.softmax(self._G, dim=-1)
 
         return self.Attn @ value
 
     @property
     def M(self):
         return self._M
+
+    @property
+    def G(self):
+        return self._G
