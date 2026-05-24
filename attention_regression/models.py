@@ -5,8 +5,9 @@ from torch.nn import functional as F
 
 
 class DotProdAttention(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, dim: int) -> None:
         super().__init__()
+        self.dim = dim
         self._M = None
         self._G = None
         self.Attn = None
@@ -21,7 +22,7 @@ class DotProdAttention(nn.Module):
             "query and key must have the same feature dimension"
 
         self._M = None
-        self._G = query @ key.T
+        self._G = query @ key.T / math.sqrt(self.dim)
         self.Attn = F.softmax(self._G, dim=-1)
 
         return self.Attn @ value
@@ -65,7 +66,7 @@ class WhitenedDotProdAttention(nn.Module):
         S_inv = torch.linalg.solve(S, I)
 
         self._M = S_inv
-        self._G = query @ S_inv @ key.T
+        self._G = query @ S_inv @ key.T / math.sqrt(self.dim)
         self.Attn = F.softmax(self._G, dim=-1)
 
         return self.Attn @ value
@@ -114,7 +115,7 @@ class LinearRegression(nn.Module):
         # Important:
         # For linear regression, this is not a probability attention matrix.
         # It may contain negative values and rows do not necessarily sum to 1.
-        self.Attn = self._G
+        self.Attn = self._G / math.sqrt(self.dim)
 
         return self.Attn @ value
 
@@ -149,7 +150,7 @@ class LearnBilinear(nn.Module):
             "query and key must have the same feature dimension"
 
         self._M = self.W
-        self._G = query @ self.W @ key.T
+        self._G = query @ self.W @ key.T / math.sqrt(self.dim)
         self.Attn = F.softmax(self._G, dim=-1)
 
         return self.Attn @ value
@@ -188,7 +189,7 @@ class Attention(nn.Module):
             "query and key must have the same feature dimension"
 
         self._M = self.Wq @ self.Wm.T
-        self._G = query @ self._M @ key.T
+        self._G = query @ self._M @ key.T / math.sqrt(self.dim)
         self.Attn = F.softmax(self._G, dim=-1)
 
         return self.Attn @ value

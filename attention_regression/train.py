@@ -24,12 +24,11 @@ class TrainConfig:
     num_epochs: int = 5
     eval_episodes: int = 100
     batch_size: int = 128
-    query_ratio: float = 0.5
+    query_ratio: float = 0.333
     log_interval: int = 20
     device: str = "cpu"
 
     use_wandb: bool = False
-    wandb_entity: str = "markrivera683-beijing-university-of-posts-and-communications"
     wandb_project: str = "attention mechanism"
 
 
@@ -94,13 +93,13 @@ def run_training(config: TrainConfig) -> None:
 
     exp_name = f"bilinear_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     log_dir = Path("logs") / exp_name
-    wandb.init(
-        project=config.wandb_project,
-        entity=config.wandb_entity,
-        name=exp_name,
-        config=config_to_dict(config),
-        dir=str(log_dir),
-    )
+    if config.use_wandb:
+        wandb.init(
+            project=config.wandb_project,
+            name=exp_name,
+            config=config_to_dict(config),
+            dir=str(log_dir),
+        )
 
     bilinearModel = torch.compile(bilinearModel)
     optimizer = torch.optim.Adam(bilinearModel.parameters(), lr=config.lr)
@@ -111,8 +110,9 @@ def run_training(config: TrainConfig) -> None:
     for epoch in range(config.num_epochs):
         for X, Y in dataloader:
             X, Y = X.to(device), Y.to(device)
+            X_m, Y_m, X_q, Y_q = sample_memory_query_batch(X, Y, config.query_ratio)
             optimizer.zero_grad()
-            loss = F.mse_loss(bilinearModel(X), Y)
+            loss = F.mse_loss(bilinearModel(X_q, X_m, Y_m), Y_q)
             loss.backward()
             optimizer.step()
 
@@ -121,19 +121,20 @@ def run_training(config: TrainConfig) -> None:
 
             steps += 1
     
-    wandb.finish()
+    if config.use_wandb:
+        wandb.finish()
 
     # Training classic Attention Model
     attnModel = Attention(config.dim).to(device)
 
     exp_name = f"attention_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     log_dir = Path("logs") / exp_name
-    wandb.init(
-        project=config.wandb_project,
-        entity=config.wandb_entity,
-        name=exp_name,
-        config=config_to_dict(config),
-        dir=str(log_dir),
+    if config.use_wandb:
+        wandb.init(
+            project=config.wandb_project,
+            name=exp_name,
+            config=config_to_dict(config),
+            dir=str(log_dir),
     )
 
     attnModel = torch.compile(attnModel)
@@ -145,8 +146,9 @@ def run_training(config: TrainConfig) -> None:
     for epoch in range(config.num_epochs):
         for X, Y in dataloader:
             X, Y = X.to(device), Y.to(device)
+            X_m, Y_m, X_q, Y_q = sample_memory_query_batch(X, Y, config.query_ratio)
             optimizer.zero_grad()
-            loss = F.mse_loss(attnModel(X), Y)
+            loss = F.mse_loss(attnModel(X_q, X_m, Y_m), Y_q)
             loss.backward()
             optimizer.step()
 
@@ -155,7 +157,8 @@ def run_training(config: TrainConfig) -> None:
 
             steps += 1
 
-    wandb.finish()
+    if config.use_wandb:
+        wandb.finish()
 
 
 def main() -> None:
