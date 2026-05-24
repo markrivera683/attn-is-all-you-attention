@@ -2,8 +2,10 @@ import torch
 import tyro
 import wandb
 import numpy as np
+import math
 
 from torch import nn
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from datetime import datetime
 from typing import Any
@@ -18,6 +20,11 @@ from .models import (
     LinearRegression,
     WhitenedDotProdAttention,
     DotProdAttention,
+)
+from .metrics import (
+    condition_number,
+    frobenius_cosine,
+    matrix_cosine_similarity,
 )
 
 @dataclass
@@ -68,6 +75,67 @@ def parse_config(
         description=description,
     )
 
+def prediction_error_sums(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+) -> tuple[float, float, int]:
+    error = pred - target
+    count = target.numel()
+    squared_error = error.pow(2).sum().item()
+    absolute_error = error.abs().sum().item()
+    return squared_error, absolute_error, count
+
+
+def ridge_references(
+    X_q: torch.Tensor,
+    X_m: torch.Tensor,
+    lambda_reg: float,
+    dim: int,
+) -> dict[str, torch.Tensor]:
+    I = torch.eye(
+        X_m.shape[-1],
+        device=X_m.device,
+        dtype=X_m.dtype,
+    )
+    M_ref = torch.linalg.solve(X_m.T @ X_m + lambda_reg * I, I)
+    G_ref_linear = X_q @ M_ref @ X_m.T
+    G_ref_softmax = G_ref_linear / math.sqrt(dim)
+    Attn_ref = F.softmax(G_ref_softmax, dim=-1)
+
+    return {
+        "M_ref": M_ref,
+        "G_ref_linear": G_ref_linear,
+        "G_ref_softmax": G_ref_softmax,
+        "Attn_ref": Attn_ref,
+    }
+
+
+def structure_metrics(
+    model: torch.nn.Module,
+    references: dict[str, torch.Tensor],
+) -> dict[str, float]:
+    values: dict[str, float] = {}
+    is_linear_regression = isinstance(model, LinearRegression)
+
+    if model.G is not None:
+        G_ref = references["G_ref_linear"] if is_linear_regression else references["G_ref_softmax"]
+        values["eval/g_cosine"] = matrix_cosine_similarity(model.G, G_ref)
+        values["eval/g_frobenius_cosine"] = frobenius_cosine(model.G, G_ref)
+
+    if model.Attn is not None:
+        Attn_ref = references["G_ref_linear"] if is_linear_regression else references["Attn_ref"]
+        metric_prefix = "linear_weight" if is_linear_regression else "attn"
+        values[f"eval/{metric_prefix}_cosine"] = matrix_cosine_similarity(model.Attn, Attn_ref)
+        values[f"eval/{metric_prefix}_frobenius_cosine"] = frobenius_cosine(model.Attn, Attn_ref)
+
+    if model.M is not None:
+        values["eval/m_cosine"] = matrix_cosine_similarity(model.M, references["M_ref"])
+        values["eval/m_frobenius_cosine"] = frobenius_cosine(model.M, references["M_ref"])
+        values["eval/m_condition_number"] = condition_number(model.M)
+
+    return values
+
+
 def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
     set_seed(config.seed)
     print(f"Using device: {config.device}")
@@ -94,20 +162,39 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
     model.eval()
     steps: int = 0
     total_loss = 0.0
+    total_absolute_error = 0.0
+    total_query_count = 0
+    metric_sums: dict[str, float] = {}
+    metric_counts: dict[str, int] = {}
     with torch.no_grad():
         for X, Y in dataloader:
             X, Y = X.to(config.device), Y.to(config.device)
             X_m, Y_m, X_q, Y_q = sample_memory_query_batch(X, Y, config.query_ratio)
             pred = model(X_q, X_m, Y_m)
-            loss = torch.nn.functional.mse_loss(pred, Y_q)
-            total_loss += loss.item() * X_q.size(0)
-            wandb.log({"eval/loss": loss.item()}, step=steps)
+            squared_error, absolute_error, query_count = prediction_error_sums(pred, Y_q)
+            loss = squared_error / query_count
+            mae = absolute_error / query_count
+            total_loss += squared_error
+            total_absolute_error += absolute_error
+            total_query_count += query_count
+
+            references = ridge_references(X_q, X_m, config.lambda_reg, config.dim)
+            batch_metrics = structure_metrics(model, references)
+            for key, value in batch_metrics.items():
+                metric_sums[key] = metric_sums.get(key, 0.0) + value
+                metric_counts[key] = metric_counts.get(key, 0) + 1
+
+            wandb.log({"eval/loss": loss, "eval/mae": mae, **batch_metrics}, step=steps)
             steps += 1
 
-    avg_loss = total_loss / len(data)
+    avg_loss = total_loss / total_query_count
+    avg_mae = total_absolute_error / total_query_count
     print(f"Average Loss: {avg_loss}")
+    print(f"Average MAE: {avg_mae}")
     wandb.summary["timestamp"] = datetime.now().isoformat()
     wandb.summary["avg_loss"] = avg_loss
+    wandb.summary["avg_mae"] = avg_mae
+    wandb.summary["total_query_count"] = total_query_count
     wandb.summary["num_steps"] = steps
     wandb.summary["num_samples"] = config.num_samples
     wandb.summary["w_true"] = config.w_true.tolist() if config.w_true is not None else None
@@ -117,6 +204,9 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
     wandb.summary["lambda_reg"] = config.lambda_reg
     wandb.summary["query_ratio"] = config.query_ratio
     wandb.summary["model"] = f"{model.__class__.__name__}"
+    for key, value in metric_sums.items():
+        summary_key = key.replace("eval/", "avg_")
+        wandb.summary[summary_key] = value / metric_counts[key]
     wandb.finish()
 
 

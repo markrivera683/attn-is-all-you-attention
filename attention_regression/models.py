@@ -115,7 +115,7 @@ class LinearRegression(nn.Module):
         # Important:
         # For linear regression, this is not a probability attention matrix.
         # It may contain negative values and rows do not necessarily sum to 1.
-        self.Attn = self._G / math.sqrt(self.dim)
+        self.Attn = self._G
 
         return self.Attn @ value
 
