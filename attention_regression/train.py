@@ -16,17 +16,24 @@ from data import synthetic_data, SynDataset
 
 @dataclass
 class TrainConfig:
-    seed: int = 42
-    samples: int = 10000
-    dim: int = 20
-    lambda_reg: float = 1e-3
-    lr: float = 1e-3
+    seed: int = 43
+
     num_epochs: int = 50
+    num_samples: int = 10000
+    dim: int = 20
+
+    w_true: torch.Tensor | None = None
+    sigma: str = "default"
+    rho: float = 0.9
+
     batch_size: int = 192
     query_ratio: float = 0.3333
+    lr: float = 1e-3
+    noise: float = 0.1
+
     log_interval: int = 10
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt_dir: Path = Path("ckpt/")
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
     use_wandb: bool = False
     wandb_project: str = "attention mechanism"
@@ -51,6 +58,21 @@ def parse_config(
         default=defaults,
         description=description,
     )
+
+
+def wandb_summary(config: TrainConfig, best_loss: float, model: str, steps: int) -> None:
+    wandb.summary["timestamp"] = datetime.datetime.now().isoformat()
+    wandb.summary["num_steps"] = steps
+    wandb.summary["num_epochs"] = config.num_epochs
+    wandb.summary["num_samples"] = config.num_samples
+    wandb.summary["dim"] = config.dim
+    wandb.summary["w_true"] = config.w_true.tolist() if config.w_true is not None else None
+    wandb.summary["sigma"] = config.sigma
+    wandb.summary["rho"] = config.rho
+    wandb.summary["noise"] = config.noise
+    wandb.summary["query_ratio"] = config.query_ratio
+    wandb.summary["best_loss"] = best_loss
+    wandb.summary["model"] = model
 
 
 def config_to_dict(config: TrainConfig) -> dict[str, Any]:
@@ -78,14 +100,21 @@ def sample_memory_query_batch(
     return Xm, Ym, Xq, Yq
 
 
-def run_training(config: TrainConfig) -> None:
+def run_training(config: TrainConfig) -> tuple[Path, Path]:
     set_seed(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     ckpt_dir = config.ckpt_dir
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-    X, Y = synthetic_data(samples=config.samples, dim=config.dim, noise=0.1)
+    X, Y = synthetic_data(
+        samples=config.num_samples, 
+        dim=config.dim, 
+        sigma=config.sigma, 
+        rho=config.rho, 
+        noise=config.noise, 
+        w=config.w_true
+    )
     data = SynDataset(X, Y)
     dataloader = DataLoader(data, batch_size=config.batch_size, shuffle=True, drop_last=True)
 
@@ -93,7 +122,7 @@ def run_training(config: TrainConfig) -> None:
     # Training the Bilinear Model
     bilinear_raw = LearnBilinear(config.dim).to(device)
 
-    exp_name = f"bilinear_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    exp_name = f"train--bilinear-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     log_dir = Path("wandb") / exp_name
     if config.use_wandb:
         wandb.init(
@@ -127,18 +156,16 @@ def run_training(config: TrainConfig) -> None:
             steps += 1
 
     if config.use_wandb:
-        wandb.summary["num_steps"] = steps
-        wandb.summary["num_epochs"] = config.num_epochs
-        wandb.summary["best_loss"] = best_loss
-        wandb.summary["model"] = "bilinear"
+        wandb_summary(config, best_loss, "bilinear", steps)
         wandb.finish()
 
+    path_bilinear_ckpt = ckpt_dir / f"train--bilinear-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pt"
     torch.save(
         {
             "bilinear": bilinearModel.state_dict(),
             "config": config_to_dict(config),
         },
-        ckpt_dir / f"bilinear_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pt",
+        path_bilinear_ckpt,
     )
 
 
@@ -146,7 +173,7 @@ def run_training(config: TrainConfig) -> None:
     # Training classic Attention Model
     attn_raw = Attention(config.dim).to(device)
 
-    exp_name = f"attention_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    exp_name = f"train--attention-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     log_dir = Path("wandb") / exp_name
     if config.use_wandb:
         wandb.init(
@@ -179,19 +206,19 @@ def run_training(config: TrainConfig) -> None:
             steps += 1
 
     if config.use_wandb:
-        wandb.summary["num_steps"] = steps
-        wandb.summary["num_epochs"] = config.num_epochs
-        wandb.summary["model"] = "attention"
-        wandb.summary["best_loss"] = best_loss
+        wandb_summary(config, best_loss, "attention", steps)
         wandb.finish()
 
+    path_attn_ckpt = ckpt_dir / f"train--attention-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pt"
     torch.save(
         {
             "attn": attnModel.state_dict(),
             "config": config_to_dict(config),
         },
-        ckpt_dir / f"attention_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pt",
+        path_attn_ckpt,
     )
+
+    return path_bilinear_ckpt, path_attn_ckpt
 
 
 def main() -> None:

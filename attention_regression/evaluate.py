@@ -23,13 +23,19 @@ from models import (
 @dataclass
 class EvalConfig:
     seed: int = 43
-    num_batches: int = 192
+
     num_samples: int = 192000
     dim: int = 20
-    lambda_reg: float = 1e-3
+
+    w_true: torch.Tensor | None = None
     sigma: str = "default"
     rho: float = 0.9
+
+    batch_size: int = 192
+    query_ratio: float = 0.3333
+    lambda_reg: float = 1e-3
     noise: float = 0.1
+
     bilinear_ckpt: Path | str | None = None
     attn_ckpt: Path | str | None = None
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -66,7 +72,7 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
     set_seed(config.seed)
     print(f"Using device: {config.device}")
 
-    exp_name = f"eval-{model.__class__.__name__}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+    exp_name = f"eval--{model.__class__.__name__}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
     wandb.init(
         project="attention mechanism",
         name=exp_name,
@@ -80,9 +86,10 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
         sigma=config.sigma,
         rho=config.rho,
         noise=config.noise,
+        w=config.w_true,
     )
     data = SynDataset(X, Y)
-    dataloader = DataLoader(data, batch_size=config.num_batches, shuffle=True, drop_last=True)
+    dataloader = DataLoader(data, batch_size=config.batch_size, shuffle=True, drop_last=True)
 
     model.eval()
     steps: int = 0
@@ -90,7 +97,7 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
     with torch.no_grad():
         for X, Y in dataloader:
             X, Y = X.to(config.device), Y.to(config.device)
-            X_m, Y_m, X_q, Y_q = sample_memory_query_batch(X, Y, query_ratio=0.3333)
+            X_m, Y_m, X_q, Y_q = sample_memory_query_batch(X, Y, config.query_ratio)
             pred = model(X_q, X_m, Y_m)
             loss = torch.nn.functional.mse_loss(pred, Y_q)
             total_loss += loss.item() * X_q.size(0)
@@ -99,16 +106,24 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
 
     avg_loss = total_loss / len(data)
     print(f"Average Loss: {avg_loss}")
+    wandb.summary["timestamp"] = datetime.now().isoformat()
     wandb.summary["avg_loss"] = avg_loss
     wandb.summary["num_steps"] = steps
     wandb.summary["num_samples"] = config.num_samples
+    wandb.summary["w_true"] = config.w_true.tolist() if config.w_true is not None else None
+    wandb.summary["sigma"] = config.sigma
+    wandb.summary["rho"] = config.rho
+    wandb.summary["noise"] = config.noise
+    wandb.summary["lambda_reg"] = config.lambda_reg
+    wandb.summary["query_ratio"] = config.query_ratio
     wandb.summary["model"] = f"{model.__class__.__name__}"
     wandb.finish()
 
 
 def load_ckpt(
         model: nn.Module, 
-        ckpt_path: Path | str | None
+        ckpt_path: Path | str | None,
+        device: str
 ) -> nn.Module:
     if ckpt_path is None:
         print("No checkpoint path provided, using untrained model.")
@@ -128,31 +143,37 @@ def load_ckpt(
         }
 
     model.load_state_dict(state_dict)
-    model.to(config.device)
+    model.to(device)
     return model
 
 
-if __name__ == "__main__":
-    config = parse_config()
-
+def run_evaluation(config: EvalConfig) -> None:
     print("==== Linear Regression Evaluation ====")
     model = LinearRegression(config.dim, config.lambda_reg).to(config.device)
     evaluate_model(model, config)
 
-    print("\n ==== DotProduct Model Evaluation ====")
+    print("\n==== DotProduct Model Evaluation ====")
     model = DotProdAttention(config.dim).to(config.device)
     evaluate_model(model, config)
 
-    print("\n ==== WhitenedDotProduct Model Evaluation ====")
+    print("\n==== WhitenedDotProduct Model Evaluation ====")
     model = WhitenedDotProdAttention(config.dim, config.lambda_reg).to(config.device)
     evaluate_model(model, config)
 
-    print("\n ==== Bilinear Model Evaluation ====")
+    print("\n==== Bilinear Model Evaluation ====")
     model = LearnBilinear(config.dim).to(config.device)
-    model = load_ckpt(model, config.bilinear_ckpt)
+    model = load_ckpt(model, config.bilinear_ckpt, config.device)
     evaluate_model(model, config)
 
-    print("\n ==== Attention Model Evaluation ====")
+    print("\n==== Attention Model Evaluation ====")
     model = Attention(config.dim).to(config.device)
-    model = load_ckpt(model, config.attn_ckpt)
+    model = load_ckpt(model, config.attn_ckpt, config.device)
     evaluate_model(model, config)
+
+
+def main() -> None:
+    config = parse_config()
+    run_evaluation(config)
+
+if __name__ == "__main__":
+    main()
