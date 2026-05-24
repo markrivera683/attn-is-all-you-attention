@@ -1,6 +1,8 @@
 import torch 
 import numpy as np
-from torch.utils.data import Dataset, random_split, DataLoader
+from torch.utils.data import Dataset
+
+from pathlib import Path
 
 class SynDataset(Dataset):
     def __init__(self, data: torch.Tensor, labels: torch.Tensor) -> None:
@@ -17,11 +19,12 @@ class SynDataset(Dataset):
 def synthetic_data(
     samples: int = 1000,
     dim: int = 20,
-    sigma: str = "default", 
+    sigma: str = "default",
     rho: float = 0.9,
     noise: float = 0.1,
     w: torch.Tensor | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    
     def make_covariance(dim: int, rho: float) -> torch.Tensor:
         if not 0 <= rho < 1:
             raise ValueError("rho must be in the range [0, 1)")
@@ -33,7 +36,26 @@ def synthetic_data(
     
     if sigma == "default":
         Sigma = make_covariance(dim, rho)
+    else:
+        sigma_path = Path(sigma)
 
+        if not sigma_path.exists():
+            raise ValueError(
+                f"sigma must be 'default' or a valid file path, but got: {sigma}"
+            )
+
+        Sigma = torch.load(sigma_path)
+
+        if not isinstance(Sigma, torch.Tensor):
+            Sigma = torch.tensor(Sigma)
+
+        Sigma = Sigma.float()
+
+        if Sigma.shape != (dim, dim):
+            raise ValueError(
+                f"Sigma must have shape ({dim}, {dim}), but got {Sigma.shape}"
+            )
+        
     L = torch.linalg.cholesky(Sigma)
     z = torch.randn(samples, dim)
     X = z @ L.t()

@@ -10,9 +10,9 @@ from typing import Any
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from train import sample_memory_query_batch
-from data import SynDataset, synthetic_data
-from models import (
+from .train import sample_memory_query_batch
+from .data import SynDataset, synthetic_data
+from .models import (
     LearnBilinear,
     Attention,
     LinearRegression,

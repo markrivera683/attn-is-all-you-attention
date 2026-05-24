@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader
 from dataclasses import dataclass, asdict
 from typing import Any
 
-from models import LearnBilinear, Attention
-from data import synthetic_data, SynDataset
+from .models import LearnBilinear, Attention
+from .data import synthetic_data, SynDataset
 
 
 @dataclass

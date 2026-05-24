@@ -48,6 +48,7 @@ class Config:
 
     # Miscellaneous
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    train_use_wandb: bool = False
 
 
 def parse_config(
@@ -89,6 +90,7 @@ def to_train_config(config: Config) -> TrainConfig:
         log_interval=config.log_interval,
         ckpt_dir=config.ckpt_dir,
         device=config.device,
+        use_wandb=config.train_use_wandb,
     )
 
 
