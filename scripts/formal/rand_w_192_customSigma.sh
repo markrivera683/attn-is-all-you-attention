@@ -21,4 +21,5 @@ PY
 
 uv run python main.py \
     --sigma ${SIGMA_PATH} \
-    --train_use_wandb
+    --train_use_wandb \
+    # --signed_weight_decay 0.0

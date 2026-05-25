@@ -6,4 +6,5 @@ cd "$ROOT_DIR"
 
 uv run python main.py \
     --rho 0.8 \
-    --train_use_wandb
+    --train_use_wandb \
+    # --signed_weight_decay 0.0

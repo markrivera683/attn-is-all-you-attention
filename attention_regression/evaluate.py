@@ -16,6 +16,7 @@ from .train import sample_memory_query_batch
 from .data import SynDataset, synthetic_data
 from .models import (
     LearnBilinear,
+    LearnSignedBilinear,
     Attention,
     LinearRegression,
     WhitenedDotProdAttention,
@@ -44,8 +45,11 @@ class EvalConfig:
     noise: float = 0.1
 
     bilinear_ckpt: Path | str | None = None
+    signed_bilinear_ckpt: Path | str | None = None
     attn_ckpt: Path | str | None = None
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    wandb_project: str = "attention mechanism"
 
 
 def config_to_dict(config: EvalConfig) -> dict[str, Any]:
@@ -115,16 +119,16 @@ def structure_metrics(
     references: dict[str, torch.Tensor],
 ) -> dict[str, float]:
     values: dict[str, float] = {}
-    is_linear_regression = isinstance(model, LinearRegression)
+    is_signed_weight_model = isinstance(model, (LinearRegression, LearnSignedBilinear))
 
     if model.G is not None:
-        G_ref = references["G_ref_linear"] if is_linear_regression else references["G_ref_softmax"]
+        G_ref = references["G_ref_linear"] if is_signed_weight_model else references["G_ref_softmax"]
         values["eval/g_cosine"] = matrix_cosine_similarity(model.G, G_ref)
         values["eval/g_frobenius_cosine"] = frobenius_cosine(model.G, G_ref)
 
     if model.Attn is not None:
-        Attn_ref = references["G_ref_linear"] if is_linear_regression else references["Attn_ref"]
-        metric_prefix = "linear_weight" if is_linear_regression else "attn"
+        Attn_ref = references["G_ref_linear"] if is_signed_weight_model else references["Attn_ref"]
+        metric_prefix = "linear_weight" if is_signed_weight_model else "attn"
         values[f"eval/{metric_prefix}_cosine"] = matrix_cosine_similarity(model.Attn, Attn_ref)
         values[f"eval/{metric_prefix}_frobenius_cosine"] = frobenius_cosine(model.Attn, Attn_ref)
 
@@ -142,7 +146,7 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
 
     exp_name = f"eval--{model.__class__.__name__}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
     wandb.init(
-        project="attention mechanism",
+        project=config.wandb_project,
         name=exp_name,
         config=config_to_dict(config),
         dir=str(Path("wandb") / exp_name),
@@ -224,13 +228,24 @@ def load_ckpt(
         raise FileNotFoundError(f"Checkpoint not found at {ckpt}")
     
     ckpt = torch.load(ckpt)
-    state_dict = ckpt["bilinear"] if "bilinear" in ckpt else ckpt["attn"]
+    if "bilinear" in ckpt:
+        state_dict = ckpt["bilinear"]
+    elif "signed_bilinear" in ckpt:
+        state_dict = ckpt["signed_bilinear"]
+    else:
+        state_dict = ckpt["attn"]
 
     if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
         state_dict = {
             k.replace("_orig_mod.", "", 1): v
             for k, v in state_dict.items()
         }
+
+    state_dict = {
+        k: v
+        for k, v in state_dict.items()
+        if k not in {"_M", "_G", "Attn"}
+    }
 
     model.load_state_dict(state_dict)
     model.to(device)
@@ -253,6 +268,11 @@ def run_evaluation(config: EvalConfig) -> None:
     print("\n==== Bilinear Model Evaluation ====")
     model = LearnBilinear(config.dim).to(config.device)
     model = load_ckpt(model, config.bilinear_ckpt, config.device)
+    evaluate_model(model, config)
+
+    print("\n==== Signed Bilinear Model Evaluation ====")
+    model = LearnSignedBilinear(config.dim).to(config.device)
+    model = load_ckpt(model, config.signed_bilinear_ckpt, config.device)
     evaluate_model(model, config)
 
     print("\n==== Attention Model Evaluation ====")

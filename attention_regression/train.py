@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from dataclasses import dataclass, asdict
 from typing import Any
 
-from .models import LearnBilinear, Attention
+from .models import LearnBilinear, LearnSignedBilinear, Attention
 from .data import synthetic_data, SynDataset
 
 
@@ -29,6 +29,8 @@ class TrainConfig:
     batch_size: int = 192
     query_ratio: float = 0.3333
     lr: float = 1e-3
+    signed_lr: float = 1e-5
+    signed_weight_decay: float = 1e-4
     noise: float = 0.1
 
     log_interval: int = 10
@@ -37,6 +39,7 @@ class TrainConfig:
 
     use_wandb: bool = False
     wandb_project: str = "attention mechanism"
+    use_compile: bool = False
 
 
 def set_seed(seed: int) -> None:
@@ -100,7 +103,7 @@ def sample_memory_query_batch(
     return Xm, Ym, Xq, Yq
 
 
-def run_training(config: TrainConfig) -> tuple[Path, Path]:
+def run_training(config: TrainConfig) -> tuple[Path, Path, Path]:
     set_seed(config.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -132,7 +135,7 @@ def run_training(config: TrainConfig) -> tuple[Path, Path]:
             dir=str(log_dir),
         )
 
-    bilinearModel = torch.compile(bilinear_raw)
+    bilinearModel = torch.compile(bilinear_raw) if config.use_compile else bilinear_raw
     optimizer = torch.optim.Adam(bilinearModel.parameters(), lr=config.lr)
 
     bilinearModel.train()
@@ -170,6 +173,64 @@ def run_training(config: TrainConfig) -> tuple[Path, Path]:
 
 
     # ================================
+    # Training signed Bilinear Model without softmax
+    signed_bilinear_raw = LearnSignedBilinear(config.dim).to(device)
+
+    exp_name = f"train--signed-bilinear-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    log_dir = Path("wandb") / exp_name
+    if config.use_wandb:
+        wandb.init(
+            project=config.wandb_project,
+            name=exp_name,
+            config=config_to_dict(config),
+            dir=str(log_dir),
+        )
+
+    signedBilinearModel = (
+        torch.compile(signed_bilinear_raw)
+        if config.use_compile
+        else signed_bilinear_raw
+    )
+    optimizer = torch.optim.Adam(
+        signedBilinearModel.parameters(),
+        lr=config.signed_lr,
+        weight_decay=config.signed_weight_decay,
+    )
+
+    signedBilinearModel.train()
+    best_loss = float("inf")
+    steps = 0
+
+    for epoch in range(config.num_epochs):
+        for X, Y in dataloader:
+            X, Y = X.to(device), Y.to(device)
+            X_m, Y_m, X_q, Y_q = sample_memory_query_batch(X, Y, config.query_ratio)
+            optimizer.zero_grad()
+            loss = F.mse_loss(signedBilinearModel(X_q, X_m, Y_m), Y_q)
+            loss.backward()
+            optimizer.step()
+            best_loss = min(best_loss, loss.item())
+
+            if config.use_wandb and steps % config.log_interval == 0:
+                wandb.log({"train/loss": loss.item()}, step=steps)
+
+            steps += 1
+
+    if config.use_wandb:
+        wandb_summary(config, best_loss, "signed_bilinear", steps)
+        wandb.finish()
+
+    path_signed_bilinear_ckpt = ckpt_dir / f"train--signed-bilinear-{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.pt"
+    torch.save(
+        {
+            "signed_bilinear": signedBilinearModel.state_dict(),
+            "config": config_to_dict(config),
+        },
+        path_signed_bilinear_ckpt,
+    )
+
+
+    # ================================
     # Training classic Attention Model
     attn_raw = Attention(config.dim).to(device)
 
@@ -183,7 +244,7 @@ def run_training(config: TrainConfig) -> tuple[Path, Path]:
             dir=str(log_dir),
     )
 
-    attnModel = torch.compile(attn_raw)
+    attnModel = torch.compile(attn_raw) if config.use_compile else attn_raw
     optimizer = torch.optim.Adam(attnModel.parameters(), lr=config.lr)
 
     attnModel.train()
@@ -218,7 +279,7 @@ def run_training(config: TrainConfig) -> tuple[Path, Path]:
         path_attn_ckpt,
     )
 
-    return path_bilinear_ckpt, path_attn_ckpt
+    return path_bilinear_ckpt, path_signed_bilinear_ckpt, path_attn_ckpt
 
 
 def main() -> None:

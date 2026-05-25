@@ -6,7 +6,11 @@ from attention_regression.evaluate import (
     ridge_references,
     structure_metrics,
 )
-from attention_regression.models import LinearRegression, WhitenedDotProdAttention
+from attention_regression.models import (
+    LearnSignedBilinear,
+    LinearRegression,
+    WhitenedDotProdAttention,
+)
 
 
 def test_prediction_error_sums_use_query_count():
@@ -58,6 +62,26 @@ def test_linear_regression_uses_linear_weight_metrics():
     model(X_q, X_m, Y_m)
     values = structure_metrics(model, ridge_references(X_q, X_m, lambda_reg, dim))
 
+    assert "eval/linear_weight_cosine" in values
+    assert "eval/attn_cosine" not in values
+    assert all(math.isfinite(value) for value in values.values())
+
+
+def test_signed_bilinear_uses_linear_weight_metrics():
+    torch.manual_seed(2)
+    dim = 4
+    lambda_reg = 1e-3
+    X_m = torch.randn(6, dim)
+    X_q = torch.randn(3, dim)
+    Y_m = torch.randn(6)
+
+    model = LearnSignedBilinear(dim=dim)
+    pred = model(X_q, X_m, Y_m)
+    values = structure_metrics(model, ridge_references(X_q, X_m, lambda_reg, dim))
+
+    assert pred.shape == (X_q.shape[0],)
+    assert torch.allclose(model.M, model.M.T)
+    assert torch.allclose(pred, torch.zeros_like(pred))
     assert "eval/linear_weight_cosine" in values
     assert "eval/attn_cosine" not in values
     assert all(math.isfinite(value) for value in values.values())

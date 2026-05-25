@@ -18,6 +18,7 @@ def test_run_matrix_analysis_smoke_without_checkpoints():
     summaries = run_matrix_analysis(
         config,
         bilinear_ckpt=None,
+        signed_bilinear_ckpt=None,
         attn_ckpt=None,
     )
 
@@ -26,12 +27,14 @@ def test_run_matrix_analysis_smoke_without_checkpoints():
         "DotProdAttention",
         "WhitenedDotProdAttention",
         "LearnBilinear",
+        "LearnSignedBilinear",
         "Attention",
     }
     assert "mse" in summaries["LinearRegression"]
     assert "linear_weight/negative_weight_fraction" in summaries["LinearRegression"]
     assert "attn/attn_js_mean" in summaries["DotProdAttention"]
     assert "m_batch_scaled_error" in summaries["LearnBilinear"]
+    assert "linear_weight/negative_weight_fraction" in summaries["LearnSignedBilinear"]
     assert all(
         math.isfinite(value)
         for model_summary in summaries.values()

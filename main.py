@@ -1,6 +1,7 @@
 import torch
 import tyro
 import numpy as np
+import datetime
 
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from attention_regression.models import (
     Attention,
     DotProdAttention,
     LearnBilinear,
+    LearnSignedBilinear,
     LinearRegression,
     WhitenedDotProdAttention,
 )
@@ -47,6 +49,8 @@ class Config:
     train_num_samples: int = 10000
 
     lr: float = 1e-3
+    signed_lr: float = 1e-5
+    signed_weight_decay: float = 1e-4
     train_batch_size: int = 192
     train_query_ratio: float = 0.3333
     
@@ -60,6 +64,7 @@ class Config:
     eval_query_ratio: float = 0.3333
     
     bilinear_ckpt: Path | str | None = None
+    signed_bilinear_ckpt: Path | str | None = None
     attn_ckpt: Path | str | None = None
 
     # Matrix analysis config
@@ -70,6 +75,9 @@ class Config:
     # Miscellaneous
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     train_use_wandb: bool = False
+    train_use_compile: bool = False
+    # wandb_name: str = "attention-regression-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    wandb_project: str = "attention mechanism-" + sigma.replace("/", "-") + "-" + str(rho)
 
 
 def parse_config(
@@ -107,11 +115,15 @@ def to_train_config(config: Config) -> TrainConfig:
         batch_size=config.train_batch_size,
         query_ratio=config.train_query_ratio,
         lr=config.lr,
+        signed_lr=config.signed_lr,
+        signed_weight_decay=config.signed_weight_decay,
         noise=config.noise,
         log_interval=config.log_interval,
         ckpt_dir=config.ckpt_dir,
         device=config.device,
         use_wandb=config.train_use_wandb,
+        wandb_project=config.wandb_project,
+        use_compile=config.train_use_compile,
     )
 
 
@@ -119,6 +131,7 @@ def to_eval_config(
     config: Config,
     *,
     bilinear_ckpt: Path | str | None,
+    signed_bilinear_ckpt: Path | str | None,
     attn_ckpt: Path | str | None,
 ) -> EvalConfig:
     return EvalConfig(
@@ -133,8 +146,10 @@ def to_eval_config(
         lambda_reg=config.lambda_reg,
         noise=config.noise,
         bilinear_ckpt=bilinear_ckpt,
+        signed_bilinear_ckpt=signed_bilinear_ckpt,
         attn_ckpt=attn_ckpt,
         device=config.device,
+        wandb_project=config.wandb_project,
     )
 
 
@@ -228,15 +243,15 @@ def batch_matrix_analysis_metrics(
         )
 
     if model.G is not None:
-        is_linear_regression = isinstance(model, LinearRegression)
-        G_ref = references["G_ref_linear"] if is_linear_regression else references["G_ref_softmax"]
+        is_signed_weight_model = isinstance(model, (LinearRegression, LearnSignedBilinear))
+        G_ref = references["G_ref_linear"] if is_signed_weight_model else references["G_ref_softmax"]
         values["g_cosine"] = metrics.matrix_cosine_similarity(model.G, G_ref)
         values["g_scaled_error"] = metrics.scaled_relative_error(model.G, G_ref)
         values.update(prefix_metrics("g_row", metrics.rowwise_cosine_stats(model.G, G_ref)))
         values.update(prefix_metrics("g_scale", metrics.logit_scale_stats(model.G, G_ref)))
 
     if model.Attn is not None:
-        if isinstance(model, LinearRegression):
+        if isinstance(model, (LinearRegression, LearnSignedBilinear)):
             values.update(prefix_metrics("linear_weight", metrics.signed_weight_stats(model.Attn)))
         else:
             values.update(
@@ -279,6 +294,7 @@ def run_matrix_analysis(
     config: Config,
     *,
     bilinear_ckpt: Path | str | None,
+    signed_bilinear_ckpt: Path | str | None,
     attn_ckpt: Path | str | None,
 ) -> dict[str, dict[str, float]]:
     set_seed(config.seed)
@@ -312,6 +328,14 @@ def run_matrix_analysis(
         (
             "LearnBilinear",
             load_ckpt(LearnBilinear(config.dim).to(device), bilinear_ckpt, config.device),
+        ),
+        (
+            "LearnSignedBilinear",
+            load_ckpt(
+                LearnSignedBilinear(config.dim).to(device),
+                signed_bilinear_ckpt,
+                config.device,
+            ),
         ),
         (
             "Attention",
@@ -364,10 +388,11 @@ def run_matrix_analysis(
 def main(config: Config) -> None:
     print("========== Training ==========")
     train_config = to_train_config(config)
-    bilinear_ckpt, attn_ckpt = run_training(train_config)
+    bilinear_ckpt, signed_bilinear_ckpt, attn_ckpt = run_training(train_config)
 
     print("========== Training Completed ==========")
     print(f"Saved bilinear model checkpoint to: {bilinear_ckpt}")
+    print(f"Saved signed bilinear model checkpoint to: {signed_bilinear_ckpt}")
     print(f"Saved attention model checkpoint to: {attn_ckpt}")
     print(f"Training logs are saved to wandb under the project: {train_config.wandb_project}")
 
@@ -375,10 +400,16 @@ def main(config: Config) -> None:
     eval_config = to_eval_config(
         config,
         bilinear_ckpt=bilinear_ckpt,
+        signed_bilinear_ckpt=signed_bilinear_ckpt,
         attn_ckpt=attn_ckpt,
     )
     run_evaluation(eval_config)
-    run_matrix_analysis(config, bilinear_ckpt=bilinear_ckpt, attn_ckpt=attn_ckpt)
+    run_matrix_analysis(
+        config,
+        bilinear_ckpt=bilinear_ckpt,
+        signed_bilinear_ckpt=signed_bilinear_ckpt,
+        attn_ckpt=attn_ckpt,
+    )
 
 
 if __name__ == "__main__":

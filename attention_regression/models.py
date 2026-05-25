@@ -149,9 +149,50 @@ class LearnBilinear(nn.Module):
         assert query.shape[-1] == key.shape[-1], \
             "query and key must have the same feature dimension"
 
-        self._M = self.W
+        # Keep this as a plain tensor cache; assigning the Parameter itself
+        # would register `_M` into state_dict as a duplicate parameter.
+        self._M = self.W.detach()
         self._G = query @ self.W @ key.T / math.sqrt(self.dim)
         self.Attn = F.softmax(self._G, dim=-1)
+
+        return self.Attn @ value
+
+    @property
+    def M(self):
+        return self._M
+
+    @property
+    def G(self):
+        return self._G
+
+
+class LearnSignedBilinear(nn.Module):
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.dim = dim
+
+        self.W = nn.Parameter(torch.zeros(dim, dim))
+
+        self._M = None
+        self._G = None
+        self.Attn = None
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        assert query.shape[-1] == key.shape[-1], \
+            "query and key must have the same feature dimension"
+
+        M = 0.5 * (self.W + self.W.T)
+        self._M = M.detach()
+        self._G = query @ M @ key.T
+
+        # This is a signed linear weight matrix, not probability attention.
+        # It can represent subtractive regression-style memory weights.
+        self.Attn = self._G
 
         return self.Attn @ value
 
