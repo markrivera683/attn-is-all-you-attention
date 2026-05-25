@@ -159,6 +159,20 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def resolve_w_true(config: Config) -> Config:
+    if config.w_true is not None:
+        return config
+
+    generator = torch.Generator().manual_seed(config.seed)
+    w_true = torch.randn(config.dim, generator=generator)
+    return Config(
+        **{
+            **config_to_dict(config),
+            "w_true": w_true,
+        }
+    )
+
+
 def load_population_covariance(config: Config) -> torch.Tensor:
     if config.sigma == "default":
         idx = torch.arange(config.dim)
@@ -386,6 +400,7 @@ def run_matrix_analysis(
 
 
 def main(config: Config) -> None:
+    config = resolve_w_true(config)
     print("========== Training ==========")
     train_config = to_train_config(config)
     bilinear_ckpt, signed_bilinear_ckpt, attn_ckpt = run_training(train_config)
