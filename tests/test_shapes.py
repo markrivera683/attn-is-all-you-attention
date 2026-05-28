@@ -1,10 +1,28 @@
 import pytest
 import torch
-from attention_regression.models import HandCraftAttention, AttentionMode
+from attention_regression.models import (
+    Attention,
+    DotProdAttention,
+    LearnBilinear,
+    LearnSignedBilinear,
+    LinearRegression,
+    WhitenedDotProdAttention,
+)
 
 
-@pytest.mark.parametrize("mode", list(AttentionMode))
-def test_attention_shapes(mode):
+@pytest.mark.parametrize(
+    ("model_name", "model_cls", "kwargs"),
+    [
+        ("DotProdAttention", DotProdAttention, {}),
+        ("WhitenedDotProdAttention", WhitenedDotProdAttention, {"lambda_reg": 1e-5}),
+        ("LinearRegression", LinearRegression, {"lambda_reg": 1e-5}),
+        ("LearnBilinear", LearnBilinear, {}),
+        ("LearnSignedBilinear", LearnSignedBilinear, {}),
+        ("Attention", Attention, {}),
+    ],
+)
+
+def test_attention_shapes(model_name, model_cls, kwargs):
 
     Q = 7
     K = 11
@@ -16,21 +34,21 @@ def test_attention_shapes(mode):
     V  = torch.randn(K, dy)
 
     expected_shape = (Q, dy)
-    model = HandCraftAttention(dim=d, mode=mode, lambda_reg=1e-5)
+    model = model_cls(dim=d, **kwargs)
 
     Yhat = model(Xq, Xk, V)
 
-    print(f"\n[Testing Mode]: {mode.name}")
+    print(f"\n[Testing Model]: {model_name}")
     print("  Xq   :", Xq.shape)
     print("  Xk   :", Xk.shape)
     print("  V    :", V.shape)
     print("  Yhat :", Yhat.shape)
 
     assert Yhat.shape == expected_shape, (
-        f"{mode.name} outputs wrong shape: "
+        f"{model_name} outputs wrong shape: "
         f"expected {expected_shape}, got {Yhat.shape}"
     )
 
     assert torch.isfinite(Yhat).all(), (
-        f"{mode.name} outputs contain invalid values (NaN or Inf)"
+        f"{model_name} outputs contain invalid values (NaN or Inf)"
     )
