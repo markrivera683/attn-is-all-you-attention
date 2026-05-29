@@ -1,32 +1,28 @@
+import math
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
 import torch
 import tyro
-import wandb
-import numpy as np
-import math
-
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
-from datetime import datetime
-from typing import Any
-from dataclasses import dataclass, asdict
-from pathlib import Path
 
-from .train import sample_memory_query_batch
 from .data import SynDataset, synthetic_data
+from .logging_utils import ExperimentLogger, make_run_id
+from .metrics import condition_number, frobenius_cosine, matrix_cosine_similarity
 from .models import (
+    Attention,
+    DotProdAttention,
     LearnBilinear,
     LearnSignedBilinear,
-    Attention,
     LinearRegression,
     WhitenedDotProdAttention,
-    DotProdAttention,
 )
-from .metrics import (
-    condition_number,
-    frobenius_cosine,
-    matrix_cosine_similarity,
-)
+from .train import sample_memory_query_batch
+
 
 @dataclass
 class EvalConfig:
@@ -34,6 +30,7 @@ class EvalConfig:
 
     num_samples: int = 192000
     dim: int = 20
+    data_mode: str = "global_w"
 
     w_true: torch.Tensor | None = None
     sigma: str = "default"
@@ -47,8 +44,10 @@ class EvalConfig:
     bilinear_ckpt: Path | str | None = None
     signed_bilinear_ckpt: Path | str | None = None
     attn_ckpt: Path | str | None = None
+    run_dir: Path = Path("runs")
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
+    use_wandb: bool = False
     wandb_project: str = "attention mechanism"
 
 
@@ -58,6 +57,7 @@ def config_to_dict(config: EvalConfig) -> dict[str, Any]:
         if isinstance(value, Path):
             data[key] = str(value)
     return data
+
 
 def set_seed(seed: int) -> None:
     np.random.seed(seed)
@@ -78,6 +78,7 @@ def parse_config(
         default=defaults,
         description=description,
     )
+
 
 def prediction_error_sums(
     pred: torch.Tensor,
@@ -140,17 +141,15 @@ def structure_metrics(
     return values
 
 
-def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
+def evaluate_model(
+    model_name: str,
+    model: torch.nn.Module,
+    config: EvalConfig,
+    logger: ExperimentLogger,
+) -> dict[str, float | str]:
     set_seed(config.seed)
-    print(f"Using device: {config.device}")
-
-    exp_name = f"eval--{model.__class__.__name__}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
-    wandb.init(
-        project=config.wandb_project,
-        name=exp_name,
-        config=config_to_dict(config),
-        dir=str(Path("wandb") / exp_name),
-    )
+    device = torch.device(config.device)
+    print(f"Evaluating {model_name} on {device}")
 
     X, Y = synthetic_data(
         samples=config.num_samples,
@@ -160,23 +159,31 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
         noise=config.noise,
         w=config.w_true,
     )
-    data = SynDataset(X, Y)
-    dataloader = DataLoader(data, batch_size=config.batch_size, shuffle=True, drop_last=True)
+    dataloader = DataLoader(
+        SynDataset(X, Y),
+        batch_size=config.batch_size,
+        shuffle=True,
+        drop_last=True,
+    )
 
     model.eval()
-    steps: int = 0
     total_loss = 0.0
     total_absolute_error = 0.0
     total_query_count = 0
     metric_sums: dict[str, float] = {}
     metric_counts: dict[str, int] = {}
     with torch.no_grad():
-        for X, Y in dataloader:
-            X, Y = X.to(config.device), Y.to(config.device)
-            X_m, Y_m, X_q, Y_q = sample_memory_query_batch(X, Y, config.query_ratio)
+        for steps, (X_batch, Y_batch) in enumerate(dataloader):
+            X_batch = X_batch.to(device)
+            Y_batch = Y_batch.to(device)
+            X_m, Y_m, X_q, Y_q = sample_memory_query_batch(
+                X_batch,
+                Y_batch,
+                config.query_ratio,
+            )
             pred = model(X_q, X_m, Y_m)
             squared_error, absolute_error, query_count = prediction_error_sums(pred, Y_q)
-            loss = squared_error / query_count
+            mse = squared_error / query_count
             mae = absolute_error / query_count
             total_loss += squared_error
             total_absolute_error += absolute_error
@@ -188,52 +195,52 @@ def evaluate_model(model: torch.nn.Module, config: EvalConfig) -> None:
                 metric_sums[key] = metric_sums.get(key, 0.0) + value
                 metric_counts[key] = metric_counts.get(key, 0) + 1
 
-            wandb.log({"eval/loss": loss, "eval/mae": mae, **batch_metrics}, step=steps)
-            steps += 1
+            logger.log(
+                {
+                    f"eval/{model_name}/mse": mse,
+                    f"eval/{model_name}/mae": mae,
+                    **{
+                        f"eval/{model_name}/{key.removeprefix('eval/')}": value
+                        for key, value in batch_metrics.items()
+                    },
+                },
+                step=steps,
+                phase="eval",
+            )
 
     avg_loss = total_loss / total_query_count
     avg_mae = total_absolute_error / total_query_count
-    print(f"Average Loss: {avg_loss}")
-    print(f"Average MAE: {avg_mae}")
-    wandb.summary["timestamp"] = datetime.now().isoformat()
-    wandb.summary["avg_loss"] = avg_loss
-    wandb.summary["avg_mae"] = avg_mae
-    wandb.summary["total_query_count"] = total_query_count
-    wandb.summary["num_steps"] = steps
-    wandb.summary["num_samples"] = config.num_samples
-    wandb.summary["w_true"] = config.w_true.tolist() if config.w_true is not None else None
-    wandb.summary["sigma"] = config.sigma
-    wandb.summary["rho"] = config.rho
-    wandb.summary["noise"] = config.noise
-    wandb.summary["lambda_reg"] = config.lambda_reg
-    wandb.summary["query_ratio"] = config.query_ratio
-    wandb.summary["model"] = f"{model.__class__.__name__}"
+    summary: dict[str, float | str] = {
+        "data_mode": config.data_mode,
+        "mse": avg_loss,
+        "mae": avg_mae,
+        "total_query_count": float(total_query_count),
+    }
     for key, value in metric_sums.items():
-        summary_key = key.replace("eval/", "avg_")
-        wandb.summary[summary_key] = value / metric_counts[key]
-    wandb.finish()
+        summary[key] = value / metric_counts[key]
+    return summary
 
 
 def load_ckpt(
-        model: nn.Module, 
+        model: nn.Module,
         ckpt_path: Path | str | None,
         device: str
 ) -> nn.Module:
     if ckpt_path is None:
         print("No checkpoint path provided, using untrained model.")
-        return model
-    
+        return model.to(device)
+
     ckpt = Path(ckpt_path)
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint not found at {ckpt}")
-    
-    ckpt = torch.load(ckpt)
-    if "bilinear" in ckpt:
-        state_dict = ckpt["bilinear"]
-    elif "signed_bilinear" in ckpt:
-        state_dict = ckpt["signed_bilinear"]
+
+    loaded = torch.load(ckpt, map_location=device)
+    if "bilinear" in loaded:
+        state_dict = loaded["bilinear"]
+    elif "signed_bilinear" in loaded:
+        state_dict = loaded["signed_bilinear"]
     else:
-        state_dict = ckpt["attn"]
+        state_dict = loaded["attn"]
 
     if any(k.startswith("_orig_mod.") for k in state_dict.keys()):
         state_dict = {
@@ -252,38 +259,65 @@ def load_ckpt(
     return model
 
 
-def run_evaluation(config: EvalConfig) -> None:
-    print("==== Linear Regression Evaluation ====")
-    model = LinearRegression(config.dim, config.lambda_reg).to(config.device)
-    evaluate_model(model, config)
+def run_evaluation(
+    config: EvalConfig,
+    logger: ExperimentLogger | None = None,
+) -> dict[str, dict[str, float | str]]:
+    owns_logger = logger is None
+    if logger is None:
+        logger = ExperimentLogger(
+            Path(config.run_dir) / make_run_id("eval"),
+            config,
+            use_wandb=config.use_wandb,
+            wandb_project=config.wandb_project,
+        )
 
-    print("\n==== DotProduct Model Evaluation ====")
-    model = DotProdAttention(config.dim).to(config.device)
-    evaluate_model(model, config)
+    device = torch.device(config.device)
+    models: list[tuple[str, torch.nn.Module]] = [
+        ("linear_regression", LinearRegression(config.dim, config.lambda_reg).to(device)),
+        ("dot_product", DotProdAttention(config.dim).to(device)),
+        (
+            "whitened_dot_product",
+            WhitenedDotProdAttention(config.dim, config.lambda_reg).to(device),
+        ),
+        (
+            "bilinear",
+            load_ckpt(LearnBilinear(config.dim).to(device), config.bilinear_ckpt, config.device),
+        ),
+        (
+            "signed_bilinear",
+            load_ckpt(
+                LearnSignedBilinear(config.dim).to(device),
+                config.signed_bilinear_ckpt,
+                config.device,
+            ),
+        ),
+        (
+            "attn",
+            load_ckpt(Attention(config.dim).to(device), config.attn_ckpt, config.device),
+        ),
+    ]
 
-    print("\n==== WhitenedDotProduct Model Evaluation ====")
-    model = WhitenedDotProdAttention(config.dim, config.lambda_reg).to(config.device)
-    evaluate_model(model, config)
+    try:
+        summaries = {
+            model_name: evaluate_model(model_name, model, config, logger)
+            for model_name, model in models
+        }
+        logger.write_summary(summaries)
+    finally:
+        if owns_logger:
+            logger.close()
 
-    print("\n==== Bilinear Model Evaluation ====")
-    model = LearnBilinear(config.dim).to(config.device)
-    model = load_ckpt(model, config.bilinear_ckpt, config.device)
-    evaluate_model(model, config)
-
-    print("\n==== Signed Bilinear Model Evaluation ====")
-    model = LearnSignedBilinear(config.dim).to(config.device)
-    model = load_ckpt(model, config.signed_bilinear_ckpt, config.device)
-    evaluate_model(model, config)
-
-    print("\n==== Attention Model Evaluation ====")
-    model = Attention(config.dim).to(config.device)
-    model = load_ckpt(model, config.attn_ckpt, config.device)
-    evaluate_model(model, config)
+    print("\nEvaluation summary")
+    for model_name, summary in summaries.items():
+        print(f"{model_name}: mse={summary['mse']:.6g}, mae={summary['mae']:.6g}")
+    return summaries
 
 
 def main() -> None:
     config = parse_config()
     run_evaluation(config)
+
 
 if __name__ == "__main__":
     main()

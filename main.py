@@ -1,7 +1,6 @@
 import torch
 import tyro
 import numpy as np
-import datetime
 
 from pathlib import Path
 from typing import Any
@@ -9,7 +8,8 @@ from dataclasses import dataclass, asdict
 from torch.utils.data import DataLoader
 
 import attention_regression.metrics as metrics
-from attention_regression.data import SynDataset, synthetic_data
+from attention_regression.comparison import run_episode_comparison
+from attention_regression.data import SynDataset, load_covariance, synthetic_data
 from attention_regression.evaluate import (
     EvalConfig,
     load_ckpt,
@@ -17,6 +17,7 @@ from attention_regression.evaluate import (
     ridge_references,
     run_evaluation,
 )
+from attention_regression.logging_utils import ExperimentLogger, make_run_id
 from attention_regression.models import (
     Attention,
     DotProdAttention,
@@ -33,13 +34,18 @@ class Config:
     """Overall configuration for the attention regression experiment"""
 
     seed: int = 43
+    train_seed: int = 43
+    eval_seed: int = 44
 
     # Data config
+    data_mode: str = "global_w"
     dim: int = 20
     w_true: torch.Tensor | None = None
     sigma: str = "default"
     rho: float = 0.9
     noise: float = 0.1
+    memory_size: int = 128
+    query_size: int = 64
 
     # Model config
     lambda_reg: float = 1e-3
@@ -47,6 +53,7 @@ class Config:
     # Train config
     train_num_epochs: int = 50
     train_num_samples: int = 10000
+    train_num_episodes: int = 1000
 
     lr: float = 1e-3
     signed_lr: float = 1e-5
@@ -59,6 +66,7 @@ class Config:
 
     # Eval Config
     eval_num_samples: int = 192000
+    eval_num_episodes: int = 1000
 
     eval_batch_size: int = 192
     eval_query_ratio: float = 0.3333
@@ -74,10 +82,12 @@ class Config:
 
     # Miscellaneous
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    run_dir: Path = Path("runs")
+    run_id: str | None = None
+    use_wandb: bool = False
     train_use_wandb: bool = False
     train_use_compile: bool = False
-    # wandb_name: str = "attention-regression-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    wandb_project: str = "attention mechanism-" + sigma.replace("/", "-") + "-" + str(rho)
+    wandb_project: str = "attention mechanism"
 
 
 def parse_config(
@@ -105,10 +115,14 @@ def config_to_dict(config: Config) -> dict[str, Any]:
 
 def to_train_config(config: Config) -> TrainConfig:
     return TrainConfig(
-        seed=config.seed,
+        seed=config.train_seed,
         num_epochs=config.train_num_epochs,
         num_samples=config.train_num_samples,
         dim=config.dim,
+        data_mode=config.data_mode,
+        num_episodes=config.train_num_episodes,
+        memory_size=config.memory_size,
+        query_size=config.query_size,
         w_true=config.w_true,
         sigma=config.sigma,
         rho=config.rho,
@@ -120,8 +134,9 @@ def to_train_config(config: Config) -> TrainConfig:
         noise=config.noise,
         log_interval=config.log_interval,
         ckpt_dir=config.ckpt_dir,
+        run_dir=config.run_dir,
         device=config.device,
-        use_wandb=config.train_use_wandb,
+        use_wandb=config.use_wandb or config.train_use_wandb,
         wandb_project=config.wandb_project,
         use_compile=config.train_use_compile,
     )
@@ -135,9 +150,10 @@ def to_eval_config(
     attn_ckpt: Path | str | None,
 ) -> EvalConfig:
     return EvalConfig(
-        seed=config.seed,
+        seed=config.eval_seed,
         num_samples=config.eval_num_samples,
         dim=config.dim,
+        data_mode=config.data_mode,
         w_true=config.w_true,
         sigma=config.sigma,
         rho=config.rho,
@@ -148,7 +164,9 @@ def to_eval_config(
         bilinear_ckpt=bilinear_ckpt,
         signed_bilinear_ckpt=signed_bilinear_ckpt,
         attn_ckpt=attn_ckpt,
+        run_dir=config.run_dir,
         device=config.device,
+        use_wandb=config.use_wandb,
         wandb_project=config.wandb_project,
     )
 
@@ -160,6 +178,8 @@ def set_seed(seed: int) -> None:
 
 
 def resolve_w_true(config: Config) -> Config:
+    if config.data_mode != "global_w":
+        return config
     if config.w_true is not None:
         return config
 
@@ -169,26 +189,7 @@ def resolve_w_true(config: Config) -> Config:
 
 
 def load_population_covariance(config: Config) -> torch.Tensor:
-    if config.sigma == "default":
-        idx = torch.arange(config.dim)
-        Sigma = config.rho ** (idx[:, None] - idx[None, :]).abs()
-        return Sigma.float()
-
-    sigma_path = Path(config.sigma)
-    if not sigma_path.exists():
-        raise ValueError(
-            f"sigma must be 'default' or a valid file path, but got: {config.sigma}"
-        )
-
-    Sigma = torch.load(sigma_path, map_location="cpu")
-    if not isinstance(Sigma, torch.Tensor):
-        Sigma = torch.tensor(Sigma)
-    Sigma = Sigma.float()
-    if Sigma.shape != (config.dim, config.dim):
-        raise ValueError(
-            f"Sigma must have shape ({config.dim}, {config.dim}), but got {Sigma.shape}"
-        )
-    return Sigma
+    return load_covariance(dim=config.dim, sigma=config.sigma, rho=config.rho)
 
 
 def prefix_metrics(prefix: str, values: dict[str, float]) -> dict[str, float]:
@@ -285,6 +286,8 @@ def summarize_metrics(
     model_name: str,
     metric_sums: dict[str, float],
     metric_counts: dict[str, int],
+    *,
+    print_summary: bool = True,
 ) -> dict[str, float]:
     summary = {
         key: metric_sums[key] / metric_counts[key]
@@ -292,9 +295,11 @@ def summarize_metrics(
         if metric_counts[key] > 0
     }
 
-    print(f"\n==== Matrix Analysis: {model_name} ====")
-    for key, value in summary.items():
-        print(f"{key}: {value:.6g}")
+    if print_summary:
+        mse = summary.get("mse", float("nan"))
+        m_cos = summary.get("m_population_cosine", float("nan"))
+        g_err = summary.get("g_scaled_error", float("nan"))
+        print(f"{model_name}: mse={mse:.6g}, m_pop_cos={m_cos:.6g}, g_err={g_err:.6g}")
 
     return summary
 
@@ -305,6 +310,7 @@ def run_matrix_analysis(
     bilinear_ckpt: Path | str | None,
     signed_bilinear_ckpt: Path | str | None,
     attn_ckpt: Path | str | None,
+    logger: ExperimentLogger | None = None,
 ) -> dict[str, dict[str, float]]:
     set_seed(config.seed)
     device = torch.device(config.device)
@@ -354,7 +360,7 @@ def run_matrix_analysis(
 
     summaries: dict[str, dict[str, float]] = {}
     print("========== Matrix Analysis ==========")
-    for model_name, model in models:
+    for model_index, (model_name, model) in enumerate(models):
         metric_sums: dict[str, float] = {}
         metric_counts: dict[str, int] = {}
         model.eval()
@@ -388,6 +394,15 @@ def run_matrix_analysis(
                     config,
                 )
                 aggregate_metric(metric_sums, metric_counts, batch_metrics)
+                if logger is not None:
+                    logger.log(
+                        {
+                            f"matrix/{model_name}/{key}": value
+                            for key, value in batch_metrics.items()
+                        },
+                        step=model_index * 1_000_000 + step,
+                        phase="matrix",
+                    )
 
         summaries[model_name] = summarize_metrics(model_name, metric_sums, metric_counts)
 
@@ -396,30 +411,63 @@ def run_matrix_analysis(
 
 def main(config: Config) -> None:
     config = resolve_w_true(config)
-    print("========== Training ==========")
-    train_config = to_train_config(config)
-    bilinear_ckpt, signed_bilinear_ckpt, attn_ckpt = run_training(train_config)
+    if config.data_mode not in {"global_w", "episodic_w"}:
+        raise ValueError("data_mode must be 'global_w' or 'episodic_w'")
 
-    print("========== Training Completed ==========")
-    print(f"Saved bilinear model checkpoint to: {bilinear_ckpt}")
-    print(f"Saved signed bilinear model checkpoint to: {signed_bilinear_ckpt}")
-    print(f"Saved attention model checkpoint to: {attn_ckpt}")
-    print(f"Training logs are saved to wandb under the project: {train_config.wandb_project}")
+    run_id = config.run_id or make_run_id(config.data_mode)
+    run_path = Path(config.run_dir) / run_id
+    with ExperimentLogger(
+        run_path,
+        config,
+        use_wandb=config.use_wandb or config.train_use_wandb,
+        wandb_project=config.wandb_project,
+        wandb_name=run_id,
+    ) as logger:
+        print(f"Run directory: {run_path}")
+        print("========== Training ==========")
+        train_config = to_train_config(config)
+        bilinear_ckpt, signed_bilinear_ckpt, attn_ckpt = run_training(
+            train_config,
+            logger=logger,
+        )
 
-    print("========== Evaluation ==========")
-    eval_config = to_eval_config(
-        config,
-        bilinear_ckpt=bilinear_ckpt,
-        signed_bilinear_ckpt=signed_bilinear_ckpt,
-        attn_ckpt=attn_ckpt,
-    )
-    run_evaluation(eval_config)
-    run_matrix_analysis(
-        config,
-        bilinear_ckpt=bilinear_ckpt,
-        signed_bilinear_ckpt=signed_bilinear_ckpt,
-        attn_ckpt=attn_ckpt,
-    )
+        print("========== Training Completed ==========")
+        print(f"Saved bilinear model checkpoint to: {bilinear_ckpt}")
+        print(f"Saved signed bilinear model checkpoint to: {signed_bilinear_ckpt}")
+        print(f"Saved attention model checkpoint to: {attn_ckpt}")
+
+        if config.data_mode == "episodic_w":
+            print("========== Per-Episode Comparison ==========")
+            run_episode_comparison(
+                config,
+                bilinear_ckpt=bilinear_ckpt,
+                signed_bilinear_ckpt=signed_bilinear_ckpt,
+                attn_ckpt=attn_ckpt,
+                logger=logger,
+            )
+            return
+
+        print("========== Evaluation ==========")
+        eval_config = to_eval_config(
+            config,
+            bilinear_ckpt=bilinear_ckpt,
+            signed_bilinear_ckpt=signed_bilinear_ckpt,
+            attn_ckpt=attn_ckpt,
+        )
+        run_evaluation(eval_config, logger=logger)
+        matrix_summaries = run_matrix_analysis(
+            config,
+            bilinear_ckpt=bilinear_ckpt,
+            signed_bilinear_ckpt=signed_bilinear_ckpt,
+            attn_ckpt=attn_ckpt,
+            logger=logger,
+        )
+        logger.write_summary(
+            {
+                model_name: {"data_mode": config.data_mode, **summary}
+                for model_name, summary in matrix_summaries.items()
+            }
+        )
 
 
 if __name__ == "__main__":

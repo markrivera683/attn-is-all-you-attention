@@ -16,3 +16,4 @@ __pycache__/
 
 wandb/
 ckpt/
+runs/
